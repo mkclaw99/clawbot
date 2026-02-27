@@ -988,52 +988,152 @@ elif page == "Self-Improvement":
 # ---------------------------------------------------------------------------
 
 elif page == "Risk & Safety":
+    import re as _re
+    from pathlib import Path as _Path
+    from config import safety_constants as SC
+    from core.safety import seal_safety_constants as _seal
+
+    def _apply_safety_constants(updates: dict) -> str:
+        """Rewrite specific constants in safety_constants.py, reseal, return new hash."""
+        # Reload the module so we always read the current file
+        import importlib, config.safety_constants as _sc_mod
+        sc_path = _Path(__file__).parent.parent / "config" / "safety_constants.py"
+        content = sc_path.read_text()
+        for name, value in updates.items():
+            if isinstance(value, bool):
+                pattern     = rf'^({_re.escape(name)}\s*=\s*)(True|False)'
+                replacement = rf'\g<1>{value}'
+            elif isinstance(value, int):
+                pattern     = rf'^({_re.escape(name)}\s*=\s*)\d+'
+                replacement = rf'\g<1>{value}'
+            else:   # float
+                pattern     = rf'^({_re.escape(name)}\s*=\s*)[\d.]+'
+                replacement = rf'\g<1>{round(value, 4)}'
+            content = _re.sub(pattern, replacement, content, flags=_re.MULTILINE)
+        sc_path.write_text(content)
+        new_hash = _seal()
+        importlib.reload(_sc_mod)
+        return new_hash
+
     st.title("Risk & Safety Status")
 
-    # Circuit Breaker Status
+    # ── Circuit Breaker ──────────────────────────────────────────────
     st.subheader("Circuit Breaker")
     cb = safety.get_state()
-    level_colors = {
+    level_labels = {
         "NORMAL":  "🟢 NORMAL",
         "LEVEL_1": "🟡 LEVEL 1 — Sizes halved",
         "LEVEL_2": "🔴 LEVEL 2 — No new orders",
         "LEVEL_3": "🚨 LEVEL 3 — FULL HALT",
     }
-    st.metric("Status", level_colors.get(cb.level.value, cb.level.value))
+    st.metric("Status", level_labels.get(cb.level.value, cb.level.value))
     if cb.triggered_at:
         st.write(f"**Triggered at:** {cb.triggered_at}")
         st.write(f"**Reason:** {cb.triggered_reason}")
 
-    from config import safety_constants as SC
+    # ── Current values ───────────────────────────────────────────────
     st.divider()
-    st.subheader("Hard Limits (Immutable)")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Max Position Size",    f"{SC.MAX_POSITION_FRACTION:.0%}")
-    col1.metric("Max Meme Position",    f"{SC.MAX_MEME_POSITION_FRACTION:.0%}")
-    col1.metric("Max Meme Allocation",  f"{SC.MAX_MEME_ALLOCATION:.0%}")
-    col2.metric("L1 Daily Loss",        f"{SC.CIRCUIT_BREAKER_L1_DAILY_LOSS:.0%}")
-    col2.metric("L2 Daily Loss",        f"{SC.CIRCUIT_BREAKER_L2_DAILY_LOSS:.0%}")
-    col2.metric("L3 Max Drawdown",      f"{SC.CIRCUIT_BREAKER_L3_DRAWDOWN:.0%}")
-    col3.metric("Max Orders/Min",       SC.MAX_ORDERS_PER_MINUTE)
-    col3.metric("Max Orders/Day",       SC.MAX_ORDERS_PER_DAY)
-    col3.metric("Min Stock Price",      f"${SC.MIN_STOCK_PRICE:.2f}")
+    st.subheader("Safety Configuration")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Max Position Size",    f"{SC.MAX_POSITION_FRACTION:.0%}")
+    c1.metric("Max Meme Position",    f"{SC.MAX_MEME_POSITION_FRACTION:.0%}")
+    c1.metric("Max Meme Allocation",  f"{SC.MAX_MEME_ALLOCATION:.0%}")
+    c2.metric("L1 Daily Loss",        f"{SC.CIRCUIT_BREAKER_L1_DAILY_LOSS:.0%}")
+    c2.metric("L2 Daily Loss",        f"{SC.CIRCUIT_BREAKER_L2_DAILY_LOSS:.0%}")
+    c2.metric("L3 Max Drawdown",      f"{SC.CIRCUIT_BREAKER_L3_DRAWDOWN:.0%}")
+    c3.metric("Max Orders/Min",       SC.MAX_ORDERS_PER_MINUTE)
+    c3.metric("Max Orders/Day",       SC.MAX_ORDERS_PER_DAY)
+    c3.metric("Min Stock Price",      f"€{SC.MIN_STOCK_PRICE:.2f}")
 
-    # Safety flags
-    st.divider()
-    st.subheader("Safety Flags")
-    flags = {
-        "Leverage":          f"{SC.MAX_LEVERAGE}× (none)",
-        "Short Selling":     "❌ DISABLED",
-        "Options Writing":   "❌ DISABLED",
-        "Futures":           "❌ DISABLED",
-        "Crypto":            "❌ DISABLED",
-        "Live Trading":      "❌ DISABLED" if not __import__('config.settings', fromlist=['LIVE_TRADING_ENABLED']).LIVE_TRADING_ENABLED else "⚠️ ENABLED",
-        "Audit Log":         "✅ Append-Only",
+    flags_display = {
+        "Leverage":        f"{SC.MAX_LEVERAGE}× (none)",
+        "Short Selling":   "✅ ON" if SC.SHORT_SELLING   else "❌ OFF",
+        "Options Writing": "✅ ON" if SC.OPTIONS_WRITING else "❌ OFF",
+        "Futures":         "✅ ON" if SC.FUTURES_TRADING else "❌ OFF",
+        "Crypto":          "✅ ON" if SC.CRYPTO_TRADING  else "❌ OFF",
+        "Live Trading":    "⚠️ ENABLED" if __import__(
+            'config.settings', fromlist=['LIVE_TRADING_ENABLED']
+        ).LIVE_TRADING_ENABLED else "❌ DISABLED",
+        "Audit Log":       "✅ Append-Only",
     }
-    df_flags = pd.DataFrame(list(flags.items()), columns=["Setting", "Value"])
-    st.dataframe(df_flags, use_container_width=True, hide_index=True)
+    st.dataframe(
+        pd.DataFrame(list(flags_display.items()), columns=["Setting", "Value"]),
+        use_container_width=True, hide_index=True,
+    )
 
-    # Audit log
+    # ── Edit form ────────────────────────────────────────────────────
+    st.divider()
+    with st.expander("Edit Safety Constants", expanded=False):
+        st.warning(
+            "Changes rewrite `config/safety_constants.py` and regenerate the "
+            "integrity hash. The engine picks up the new values on its next cycle."
+        )
+        with st.form("safety_edit_form"):
+            st.subheader("Position Limits")
+            e1, e2 = st.columns(2)
+            new_max_pos      = e1.number_input(
+                "Max Position Size (%)", min_value=1, max_value=20,
+                value=int(round(SC.MAX_POSITION_FRACTION * 100)), step=1,
+            )
+            new_max_strat    = e2.number_input(
+                "Max Strategy Allocation (%)", min_value=10, max_value=50,
+                value=int(round(SC.MAX_STRATEGY_ALLOCATION * 100)), step=5,
+            )
+            e3, e4 = st.columns(2)
+            new_max_meme     = e3.number_input(
+                "Max Meme Allocation (%)", min_value=1, max_value=25,
+                value=int(round(SC.MAX_MEME_ALLOCATION * 100)), step=1,
+            )
+            new_max_meme_pos = e4.number_input(
+                "Max Meme Position Size (%)", min_value=1, max_value=10,
+                value=int(round(SC.MAX_MEME_POSITION_FRACTION * 100)), step=1,
+            )
+            new_min_price    = st.number_input(
+                "Min Stock Price (€)", min_value=0.10, max_value=10.0,
+                value=float(SC.MIN_STOCK_PRICE), step=0.10, format="%.2f",
+            )
+
+            st.subheader("Order Rate Limits")
+            e5, e6 = st.columns(2)
+            new_orders_min   = e5.number_input(
+                "Max Orders / Minute", min_value=1, max_value=20,
+                value=int(SC.MAX_ORDERS_PER_MINUTE), step=1,
+            )
+            new_orders_day   = e6.number_input(
+                "Max Orders / Day", min_value=10, max_value=500,
+                value=int(SC.MAX_ORDERS_PER_DAY), step=10,
+            )
+
+            st.subheader("Feature Flags")
+            f1, f2, f3, f4 = st.columns(4)
+            new_short   = f1.checkbox("Short Selling",   value=bool(SC.SHORT_SELLING))
+            new_options = f2.checkbox("Options Writing", value=bool(SC.OPTIONS_WRITING))
+            new_futures = f3.checkbox("Futures Trading", value=bool(SC.FUTURES_TRADING))
+            new_crypto  = f4.checkbox("Crypto Trading",  value=bool(SC.CRYPTO_TRADING))
+
+            save_btn = st.form_submit_button("Save & Reseal", type="primary")
+
+        if save_btn:
+            try:
+                new_hash = _apply_safety_constants({
+                    "MAX_POSITION_FRACTION":    new_max_pos  / 100,
+                    "MAX_STRATEGY_ALLOCATION":  new_max_strat / 100,
+                    "MAX_MEME_ALLOCATION":       new_max_meme / 100,
+                    "MAX_MEME_POSITION_FRACTION": new_max_meme_pos / 100,
+                    "MIN_STOCK_PRICE":           new_min_price,
+                    "MAX_ORDERS_PER_MINUTE":     int(new_orders_min),
+                    "MAX_ORDERS_PER_DAY":        int(new_orders_day),
+                    "SHORT_SELLING":             new_short,
+                    "OPTIONS_WRITING":           new_options,
+                    "FUTURES_TRADING":           new_futures,
+                    "CRYPTO_TRADING":            new_crypto,
+                })
+                st.success(f"Saved and resealed. New hash: `{new_hash}`")
+                st.rerun()
+            except Exception as _err:
+                st.error(f"Failed to save: {_err}")
+
+    # ── Audit log ────────────────────────────────────────────────────
     st.divider()
     st.subheader("Today's Audit Log")
     records = read_audit_log()
