@@ -47,6 +47,7 @@ STRATEGY_PORTFOLIOS = [
     "mean_reversion",
     "options_flow",
     "macro_news",
+    "long_short_equity",
 ]
 
 
@@ -146,20 +147,25 @@ def cmd_scan(_args) -> None:
     from strategies.mean_reversion import MeanReversionStrategy
     from strategies.options_flow import OptionsFlowStrategy
     from strategies.macro_news import MacroNewsStrategy
+    from strategies.long_short_equity import LongShortEquityStrategy
 
     # Aggregate held positions across all strategy portfolios
     held_set: set[str] = set()
     combined_value = 0.0
+    ls_position_qtys: dict = {}
     for pid in STRATEGY_PORTFOLIOS:
         broker = Broker(portfolio_id=pid)
         pm     = PortfolioManager(broker)
         state  = pm.sync()
-        held_set     |= {p.symbol for p in state.positions}
+        held_set       |= {p.symbol for p in state.positions}
         combined_value += state.portfolio_value
+        if pid == "long_short_equity":
+            ls_position_qtys = {p.symbol: p.qty for p in state.positions}
 
     aggregator = SignalAggregator()
     context    = aggregator.refresh(force=True)
     context["current_positions"] = held_set
+    context["position_qtys"]     = ls_position_qtys   # for L/S exit signals
 
     strategies = [
         MemeMomentumStrategy(),
@@ -167,6 +173,7 @@ def cmd_scan(_args) -> None:
         MeanReversionStrategy(),
         OptionsFlowStrategy(),
         MacroNewsStrategy(),
+        LongShortEquityStrategy(),
     ]
 
     all_signals = []
@@ -311,6 +318,7 @@ def cmd_optimize(_args) -> None:
     from strategies.mean_reversion import MeanReversionStrategy
     from strategies.options_flow import OptionsFlowStrategy
     from strategies.macro_news import MacroNewsStrategy
+    from strategies.long_short_equity import LongShortEquityStrategy
 
     strategies = [
         MemeMomentumStrategy(),
@@ -318,6 +326,7 @@ def cmd_optimize(_args) -> None:
         MeanReversionStrategy(),
         OptionsFlowStrategy(),
         MacroNewsStrategy(),
+        LongShortEquityStrategy(),
     ]
     aggregator = SignalAggregator()
     optimizer  = Optimizer(strategies, aggregator)
@@ -435,6 +444,7 @@ def cmd_run_cycle(_args) -> None:
     from strategies.mean_reversion import MeanReversionStrategy
     from strategies.options_flow import OptionsFlowStrategy
     from strategies.macro_news import MacroNewsStrategy
+    from strategies.long_short_equity import LongShortEquityStrategy
 
     executed: list[dict] = []
     blocked:  list[dict] = []
@@ -473,14 +483,20 @@ def cmd_run_cycle(_args) -> None:
         MeanReversionStrategy(),
         OptionsFlowStrategy(),
         MacroNewsStrategy(),
+        LongShortEquityStrategy(),
     ]
+
+    # Inject circuit breaker level into context for L/S risk overlay
+    context["circuit_breaker_level"] = breaker_level
 
     # Collect signals per-strategy (no deduplication — each strategy trades independently)
     strategy_signals: dict[str, list] = {}
     for strat in strategy_classes:
         pid = strat.name
         held = {p.symbol for p in states[pid].positions}
-        ctx = {**context, "current_positions": held}
+        # Include position quantities (+ long, - short) for L/S exit signal generation
+        position_qtys = {p.symbol: p.qty for p in states[pid].positions}
+        ctx = {**context, "current_positions": held, "position_qtys": position_qtys}
         try:
             sigs = strat.generate_signals(ctx.get("universe", []), ctx)
             strategy_signals[pid] = sigs
@@ -562,6 +578,69 @@ def cmd_run_cycle(_args) -> None:
                                                sig.strategy, sig.is_meme)
                         executed.append({
                             "symbol": symbol, "action": "SELL", "qty": sell_qty,
+                            "price": result.filled_price or price,
+                            "strategy": strat_name, "confidence": sig.confidence,
+                        })
+
+                    elif sig.action == "SHORT":
+                        price = broker.get_latest_price(symbol)
+                        if price <= 0:
+                            continue
+                        qty = max(1, int(
+                            portfolio_value * 0.02 * sig.confidence * size_mult / price
+                        ))
+                        # Use absolute value of existing short exposure for safety check
+                        existing_pos = broker.get_position(symbol)
+                        existing_short_val = (
+                            abs(existing_pos.market_value)
+                            if (existing_pos and existing_pos.qty < 0) else 0.0
+                        )
+                        allowed, reason = safety.check_order(
+                            symbol=symbol, action="SHORT", qty=qty, price=price,
+                            strategy=sig.strategy, portfolio_value=portfolio_value,
+                            current_position_value=existing_short_val,
+                            strategy_exposure=strategy_exposure,
+                            is_meme=sig.is_meme,
+                        )
+                        if not allowed:
+                            blocked.append({"symbol": symbol, "action": "SHORT",
+                                            "strategy": strat_name, "reason": reason})
+                            continue
+                        result = broker.market_short(symbol, qty)
+                        portfolio.record_trade(result.order_id, symbol, "SHORT",
+                                               qty, result.filled_price or price,
+                                               sig.strategy, sig.is_meme)
+                        executed.append({
+                            "symbol": symbol, "action": "SHORT", "qty": qty,
+                            "price": result.filled_price or price,
+                            "strategy": strat_name, "confidence": sig.confidence,
+                        })
+
+                    elif sig.action == "COVER":
+                        pos = broker.get_position(symbol)
+                        if not pos or pos.qty >= 0:
+                            continue   # no short position to cover
+                        cover_qty = abs(pos.qty)
+                        price     = broker.get_latest_price(symbol) or pos.current_price
+                        if price <= 0:
+                            continue
+                        allowed, reason = safety.check_order(
+                            symbol=symbol, action="COVER", qty=cover_qty, price=price,
+                            strategy=sig.strategy, portfolio_value=portfolio_value,
+                            current_position_value=abs(pos.market_value),
+                            strategy_exposure=strategy_exposure,
+                            is_meme=sig.is_meme,
+                        )
+                        if not allowed:
+                            blocked.append({"symbol": symbol, "action": "COVER",
+                                            "strategy": strat_name, "reason": reason})
+                            continue
+                        result = broker.market_cover(symbol, cover_qty)
+                        portfolio.record_trade(result.order_id, symbol, "COVER",
+                                               cover_qty, result.filled_price or price,
+                                               sig.strategy, sig.is_meme)
+                        executed.append({
+                            "symbol": symbol, "action": "COVER", "qty": cover_qty,
                             "price": result.filled_price or price,
                             "strategy": strat_name, "confidence": sig.confidence,
                         })

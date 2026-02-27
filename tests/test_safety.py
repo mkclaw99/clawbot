@@ -162,8 +162,9 @@ class TestRateLimiting:
 
 class TestSafetyConstants:
 
-    def test_no_shorting_allowed(self):
-        assert SC.SHORT_SELLING is False
+    def test_short_selling_flag_is_bool(self):
+        # SHORT_SELLING is a boolean toggle; when False the safety layer blocks shorts
+        assert isinstance(SC.SHORT_SELLING, bool)
 
     def test_no_leverage(self):
         assert SC.MAX_LEVERAGE == 1.0

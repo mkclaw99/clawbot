@@ -255,9 +255,34 @@ class SafetyLayer:
         NEVER raises — always returns a decision.
         """
 
-        # 1. Short selling blocked
-        if action == "SELL_SHORT" or (action == "SELL" and qty < 0):
-            reason = "Short selling is disabled"
+        # 1. SHORT / COVER gate (replaces old unconditional block)
+        if action in ("SHORT", "SELL_SHORT"):
+            if not SC.SHORT_SELLING:
+                reason = "Short selling disabled — enable in Risk & Safety dashboard"
+                audit_order(action, symbol, qty, price, strategy, reason, False)
+                return False, reason
+            action = "SHORT"   # normalise SELL_SHORT → SHORT; falls through to BUY checks
+
+        elif action == "COVER":
+            if not SC.SHORT_SELLING:
+                reason = "Short selling disabled — enable in Risk & Safety dashboard"
+                audit_order(action, symbol, qty, price, strategy, reason, False)
+                return False, reason
+            # COVER only needs: penny-stock filter + full-halt check, then allow
+            if price < SC.MIN_STOCK_PRICE:
+                reason = f"Price ${price:.2f} below minimum ${SC.MIN_STOCK_PRICE:.2f}"
+                audit_order(action, symbol, qty, price, strategy, reason, False)
+                return False, reason
+            if self._state.level == BreakerLevel.LEVEL_3:
+                reason = f"Circuit breaker LEVEL_3 active: {self._state.triggered_reason}"
+                audit_order(action, symbol, qty, price, strategy, reason, False)
+                return False, reason
+            audit_order(action, symbol, qty, price, strategy, "All checks passed", True)
+            self._record_order()
+            return True, "OK"
+
+        elif action == "SELL" and qty < 0:
+            reason = "Short selling is disabled (SELL with negative qty)"
             audit_order(action, symbol, qty, price, strategy, reason, False)
             return False, reason
 
@@ -269,7 +294,7 @@ class SafetyLayer:
 
         trade_value = qty * price
 
-        if action == "BUY":
+        if action in ("BUY", "SHORT"):
             # 3. Rate limiting
             ok, reason = self._check_rate_limit()
             if not ok:

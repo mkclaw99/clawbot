@@ -76,6 +76,7 @@ class AccountInfo:
     cash: float
     buying_power: float
     equity: float
+    short_exposure: float = 0.0   # absolute value of all short positions
 
 
 # ---------------------------------------------------------------------------
@@ -169,12 +170,14 @@ class Broker:
                 acct = session.get(PaperAccount, self._portfolio_id)
                 cash = acct.cash if acct else STARTING_CAPITAL
                 positions = self._fetch_positions(session)
-                equity = sum(p.market_value for p in positions)
+                equity         = sum(p.market_value for p in positions)
+                short_exposure = sum(abs(p.market_value) for p in positions if p.qty < 0)
             return AccountInfo(
                 portfolio_value=cash + equity,
                 cash=cash,
                 buying_power=cash,
                 equity=equity,
+                short_exposure=short_exposure,
             )
         except Exception as e:
             logger.error(f"get_account [{self._portfolio_id}] failed: {e}")
@@ -198,12 +201,18 @@ class Broker:
                 .all())
         out = []
         for row in rows:
-            if row.qty <= 0:
+            if row.qty == 0:
                 continue
             cp = _get_price(row.symbol)
-            mv = row.qty * cp
-            pnl = (cp - row.avg_entry_price) * row.qty
-            pct = ((cp / row.avg_entry_price) - 1) if row.avg_entry_price else 0.0
+            mv = row.qty * cp   # negative for short positions
+            if row.qty > 0:
+                # Long position: profit when price rises
+                pnl = (cp - row.avg_entry_price) * row.qty
+                pct = ((cp / row.avg_entry_price) - 1) if row.avg_entry_price else 0.0
+            else:
+                # Short position: profit when price falls
+                pnl = (row.avg_entry_price - cp) * abs(row.qty)
+                pct = ((row.avg_entry_price / cp) - 1) if cp else 0.0
             out.append(Position(
                 symbol=row.symbol, qty=row.qty,
                 avg_entry_price=row.avg_entry_price,
@@ -310,6 +319,104 @@ class Broker:
         except Exception as e:
             logger.error(f"market_sell [{self._portfolio_id}] {symbol}: {e}")
             return OrderResult("ERROR", symbol, "SELL", qty, 0, "error", "")
+
+    def market_short(self, symbol: str, qty: float) -> OrderResult:
+        """Open a short position: receive proceeds, record negative-qty position."""
+        logger.info(f"[BROKER:{self._portfolio_id}] SHORT {qty} {symbol}")
+        qty = float(qty)
+        if qty <= 0:
+            return OrderResult("", symbol, "SHORT", qty, 0, "rejected",
+                               datetime.now(timezone.utc).isoformat())
+
+        price = _get_price(symbol)
+        if price <= 0:
+            return OrderResult("", symbol, "SHORT", qty, 0, "error",
+                               datetime.now(timezone.utc).isoformat())
+
+        proceeds = qty * price
+        try:
+            with Session(self._engine) as session:
+                acct = session.get(PaperAccount, self._portfolio_id)
+                acct.cash += proceeds          # short sale proceeds credited
+                acct.updated_at = datetime.now(timezone.utc)
+
+                pos = session.get(PaperPosition, (self._portfolio_id, symbol))
+                now = datetime.now(timezone.utc)
+                short_qty = -qty              # stored as negative
+                if pos:
+                    # Add to existing short (both must be short, i.e. qty < 0)
+                    new_qty = pos.qty + short_qty
+                    old_abs = abs(pos.qty)
+                    new_abs = abs(new_qty)
+                    avg = (
+                        (pos.avg_entry_price * old_abs + price * qty) / new_abs
+                        if new_abs > 0 else price
+                    )
+                    pos.qty             = new_qty
+                    pos.avg_entry_price = avg
+                    pos.updated_at      = now
+                else:
+                    session.add(PaperPosition(
+                        portfolio_id=self._portfolio_id, symbol=symbol,
+                        qty=short_qty, avg_entry_price=price,
+                        created_at=now, updated_at=now,
+                    ))
+                session.commit()
+
+            order_id = f"paper-SH-{self._portfolio_id[:4]}-{symbol}-{uuid.uuid4().hex[:6]}"
+            logger.info(f"[BROKER:{self._portfolio_id}] SHORT filled: {qty} {symbol} @ ${price:.2f}")
+            return OrderResult(order_id=order_id, symbol=symbol, action="SHORT",
+                               qty=qty, filled_price=price, status="filled",
+                               timestamp=datetime.now(timezone.utc).isoformat())
+        except Exception as e:
+            logger.error(f"market_short [{self._portfolio_id}] {symbol}: {e}")
+            return OrderResult("ERROR", symbol, "SHORT", qty, 0, "error", "")
+
+    def market_cover(self, symbol: str, qty: float) -> OrderResult:
+        """Cover (close) a short position: pay current price, remove negative-qty position."""
+        logger.info(f"[BROKER:{self._portfolio_id}] COVER {qty} {symbol}")
+        qty = float(qty)
+        if qty <= 0:
+            return OrderResult("", symbol, "COVER", qty, 0, "rejected",
+                               datetime.now(timezone.utc).isoformat())
+
+        price = _get_price(symbol)
+        if price <= 0:
+            return OrderResult("", symbol, "COVER", qty, 0, "error",
+                               datetime.now(timezone.utc).isoformat())
+
+        try:
+            with Session(self._engine) as session:
+                pos = session.get(PaperPosition, (self._portfolio_id, symbol))
+                if not pos or pos.qty >= 0:
+                    logger.warning(f"[{self._portfolio_id}] No short position in {symbol} to cover")
+                    return OrderResult("", symbol, "COVER", qty, price, "rejected",
+                                       datetime.now(timezone.utc).isoformat())
+                if abs(pos.qty) < qty:
+                    logger.warning(
+                        f"[{self._portfolio_id}] Cover qty {qty} > short {abs(pos.qty)} for {symbol}"
+                    )
+                    return OrderResult("", symbol, "COVER", qty, price, "rejected",
+                                       datetime.now(timezone.utc).isoformat())
+
+                acct = session.get(PaperAccount, self._portfolio_id)
+                acct.cash -= qty * price       # buy back at current price
+                acct.updated_at = datetime.now(timezone.utc)
+
+                pos.qty += qty                 # qty is negative; adding positive reduces abs
+                pos.updated_at = datetime.now(timezone.utc)
+                if pos.qty >= 0:
+                    session.delete(pos)
+                session.commit()
+
+            order_id = f"paper-CV-{self._portfolio_id[:4]}-{symbol}-{uuid.uuid4().hex[:6]}"
+            logger.info(f"[BROKER:{self._portfolio_id}] COVER filled: {qty} {symbol} @ ${price:.2f}")
+            return OrderResult(order_id=order_id, symbol=symbol, action="COVER",
+                               qty=qty, filled_price=price, status="filled",
+                               timestamp=datetime.now(timezone.utc).isoformat())
+        except Exception as e:
+            logger.error(f"market_cover [{self._portfolio_id}] {symbol}: {e}")
+            return OrderResult("ERROR", symbol, "COVER", qty, 0, "error", "")
 
     def close_position(self, symbol: str) -> Optional[OrderResult]:
         pos = self.get_position(symbol)

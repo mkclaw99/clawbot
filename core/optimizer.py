@@ -67,6 +67,10 @@ PARAM_BOUNDS: dict[str, dict[str, tuple]] = {
         "BUY_SENTIMENT_THRESHOLD":  (0.40, 0.75, 0.05),
         "SELL_SENTIMENT_THRESHOLD": (-0.60, -0.25, 0.05),
     },
+    "long_short_equity": {
+        "LONG_THRESHOLD":  (0.15, 0.50, 0.05),
+        "SHORT_THRESHOLD": (-0.50, -0.15, 0.05),
+    },
 }
 
 # Allocation weight bounds per strategy (must sum to 1.0)

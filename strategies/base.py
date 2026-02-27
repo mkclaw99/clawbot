@@ -26,7 +26,7 @@ class SignalResult:
 
     @property
     def is_actionable(self) -> bool:
-        return self.action in ("BUY", "SELL") and self.confidence >= 0.5
+        return self.action in ("BUY", "SELL", "SHORT", "COVER") and self.confidence >= 0.5
 
 
 class BaseStrategy(ABC):

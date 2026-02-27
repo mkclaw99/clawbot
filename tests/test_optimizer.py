@@ -244,7 +244,7 @@ class TestParamBoundsIntegrity:
 
     def test_all_strategies_have_bounds(self):
         expected = {"meme_momentum", "technical_trend", "mean_reversion",
-                    "options_flow", "macro_news"}
+                    "options_flow", "macro_news", "long_short_equity"}
         assert set(PARAM_BOUNDS.keys()) == expected
 
     def test_all_bounds_are_valid_tuples(self):
