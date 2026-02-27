@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections import defaultdict
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone, timedelta
@@ -36,6 +37,7 @@ from config.settings import (
     OPTIMIZER_MAX_STEP_PCT,
 )
 from core.audit import audit_param_change, audit_system
+from core.llm_client import LLMClient
 from crawler.web_searcher import WebResearcher, ResearchFinding
 
 # ---------------------------------------------------------------------------
@@ -200,12 +202,18 @@ class ParameterTuner:
     """
     Adjusts strategy class attributes within PARAM_BOUNDS.
     Never touches safety_constants.py.
+
+    When an LLMClient is supplied the tuner asks the LLM which parameter to
+    change and in which direction.  The LLM recommendation is advisory: the
+    final value is always computed by _compute_new_val() which enforces hard
+    bounds, step limits, and the 10% OPTIMIZER_MAX_STEP_PCT cap.
     """
 
-    def __init__(self, strategies: list, state: OptimizerState) -> None:
-        # strategies: list of BaseStrategy instances
+    def __init__(self, strategies: list, state: OptimizerState,
+                 llm: LLMClient | None = None) -> None:
         self._strategy_map = {s.name: s for s in strategies}
         self._state        = state
+        self._llm          = llm
 
     def tune(self, perfs: dict[str, StrategyPerf]) -> list[dict]:
         """
@@ -242,12 +250,24 @@ class ParameterTuner:
         if reversion:
             return reversion
 
-        # Decide direction: if improving, try to push further in the same direction;
-        # if declining, loosen the entry threshold to get more trades
+        # Ask LLM for a recommendation; fall back to simple heuristic
+        llm_rec   = self._llm_recommend_param(strategy, perf, bounds_for_strategy)
         direction = "tighten" if perf.is_improving else "loosen"
 
-        # Pick one param to adjust (skip any on cooling period)
-        for param, (lo, hi, step) in bounds_for_strategy.items():
+        # Build ordered param list — LLM-preferred param first
+        params_ordered = list(bounds_for_strategy.items())
+        if llm_rec and llm_rec["direction"] != "no_change":
+            rec_param = llm_rec["param"]
+            params_ordered = (
+                [(rec_param, bounds_for_strategy[rec_param])] +
+                [(p, b) for p, b in params_ordered if p != rec_param]
+            )
+            logger.info(
+                f"[Tuner/LLM] {strategy.name}: recommends {rec_param} → "
+                f"{llm_rec['direction']} | {llm_rec.get('reasoning', '')}"
+            )
+
+        for idx, (param, (lo, hi, step)) in enumerate(params_ordered):
             if not self._is_cooled(strategy.name, param):
                 continue
 
@@ -255,36 +275,102 @@ class ParameterTuner:
             if current is None:
                 continue
 
-            new_val = self._compute_new_val(current, lo, hi, step, direction, perf)
+            # Use LLM direction for the recommended param; heuristic for the rest
+            if llm_rec and llm_rec["direction"] != "no_change" and idx == 0:
+                param_direction = "tighten" if llm_rec["direction"] == "increase" else "loosen"
+            else:
+                param_direction = direction
+
+            new_val = self._compute_new_val(current, lo, hi, step, param_direction, perf)
             if new_val is None or new_val == current:
                 continue
 
             old_val = current
             setattr(strategy, param, new_val)
 
-            # Record the change
             now_iso = datetime.now(timezone.utc).isoformat()
             self._state.last_changed.setdefault(strategy.name, {})[param]       = now_iso
             self._state.win_rate_at_change.setdefault(strategy.name, {})[param] = perf.win_rate
             self._state.value_at_change.setdefault(strategy.name, {})[param]    = old_val
 
+            llm_note = (f" [LLM: {llm_rec['reasoning']}]"
+                        if llm_rec and idx == 0 and llm_rec.get("reasoning") else "")
             reason = (
                 f"win_rate={perf.win_rate:.1f}% (recent={perf.recent_win_rate:.1f}%, "
                 f"prior={perf.prior_win_rate:.1f}%), sharpe={perf.sharpe:.3f}, "
-                f"{'improving' if perf.is_improving else 'declining'} → {direction}"
+                f"{'improving' if perf.is_improving else 'declining'} → {param_direction}"
+                f"{llm_note}"
             )
             audit_param_change(strategy.name, param, old_val, new_val, reason)
             logger.info(f"[Tuner] {strategy.name}.{param}: {old_val} → {new_val} ({reason})")
 
             return {
-                "strategy": strategy.name,
-                "param": param,
-                "old_val": old_val,
-                "new_val": new_val,
-                "reason": reason,
+                "strategy":  strategy.name,
+                "param":     param,
+                "old_val":   old_val,
+                "new_val":   new_val,
+                "reason":    reason,
                 "timestamp": now_iso,
             }
 
+        return None
+
+    # ------------------------------------------------------------------
+    # LLM advisory
+    # ------------------------------------------------------------------
+
+    def _llm_recommend_param(
+        self, strategy, perf: StrategyPerf, bounds: dict
+    ) -> dict | None:
+        """
+        Ask the LLM which parameter to tune and in which direction.
+        Returns {"param": str, "direction": "increase"|"decrease"|"no_change",
+                 "reasoning": str}  or None if LLM is unavailable / reply invalid.
+
+        The LLM is ADVISORY ONLY — bounds and step limits are enforced afterwards.
+        """
+        if not self._llm:
+            return None
+
+        current_params = {
+            param: getattr(strategy, param, None)
+            for param in bounds
+        }
+        param_info = {
+            p: {"current": current_params.get(p), "min": b[0], "max": b[1], "step": b[2]}
+            for p, b in bounds.items()
+        }
+
+        prompt = (
+            f"You are a quantitative trading parameter advisor for a German equity strategy.\n\n"
+            f"Strategy: {strategy.name}\n"
+            f"Performance metrics:\n"
+            f"  total_trades={perf.total_trades}, win_rate={perf.win_rate:.1f}%, "
+            f"  recent_win_rate={perf.recent_win_rate:.1f}%, "
+            f"  prior_win_rate={perf.prior_win_rate:.1f}%, "
+            f"  sharpe={perf.sharpe:.3f}, total_pnl={perf.total_pnl:.2f}, "
+            f"  trend={'improving' if perf.is_improving else 'declining'}\n\n"
+            f"Tunable parameters (with allowed bounds):\n"
+            f"{json.dumps(param_info, indent=2)}\n\n"
+            f"Which single parameter change would most improve this strategy's risk-adjusted "
+            f"return? Respond with JSON only — no explanation outside the JSON:\n"
+            f'{{"param": "<param_name>", "direction": "increase" | "decrease" | "no_change", '
+            f'"reasoning": "<one sentence max 15 words>"}}'
+        )
+
+        result = self._llm.complete_json(
+            [{"role": "user", "content": prompt}],
+            max_tokens=150,
+            temperature=0.1,
+        )
+        if (
+            result
+            and result.get("param") in bounds
+            and result.get("direction") in ("increase", "decrease", "no_change")
+        ):
+            return result
+
+        logger.debug(f"[Tuner/LLM] Invalid or no response for {strategy.name}: {result}")
         return None
 
     def _check_revert(self, strategy, perf: StrategyPerf, bounds: dict) -> dict | None:
@@ -481,9 +567,18 @@ class Optimizer:
         self._aggregator  = aggregator
         self._state       = self._load_state()
         self._analyzer    = PerformanceAnalyzer()
-        self._tuner       = ParameterTuner(strategies, self._state)
-        self._allocator   = StrategyAllocator([s.name for s in strategies], self._state)
-        self._researcher  = WebResearcher()
+
+        # LLM client — used by tuner and researcher; gracefully absent if offline
+        self._llm = LLMClient()
+        if self._llm.available():
+            logger.info(f"[Optimizer] LLM online: {self._llm._model} @ {self._llm._url}")
+        else:
+            logger.warning("[Optimizer] LLM offline — falling back to heuristics")
+            self._llm = None
+
+        self._tuner      = ParameterTuner(strategies, self._state, llm=self._llm)
+        self._allocator  = StrategyAllocator([s.name for s in strategies], self._state)
+        self._researcher = WebResearcher(llm=self._llm)
         _STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
         _RESEARCH_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
         logger.info("[Optimizer] Initialized.")
@@ -521,8 +616,9 @@ class Optimizer:
         findings    = self._researcher.run_research()
         regime      = self._researcher.extract_market_regime(findings)
         new_tickers = self._researcher.extract_trending_tickers(findings)
+        insights    = self._researcher.synthesize_insights(findings)
         self._update_universe(new_tickers)
-        self._save_research(findings)
+        self._save_research(findings, insights)
 
         # 5. Persist state
         self._state.run_history.append({
@@ -539,13 +635,14 @@ class Optimizer:
         self._save_state()
 
         summary = {
-            "timestamp":     now.isoformat(),
-            "param_changes": param_changes,
-            "weights":       new_weights,
-            "market_regime": regime,
+            "timestamp":      now.isoformat(),
+            "param_changes":  param_changes,
+            "weights":        new_weights,
+            "market_regime":  regime,
             "findings_count": len(findings),
-            "new_tickers":   new_tickers[:10],
-            "perfs":         {k: {
+            "new_tickers":    new_tickers[:10],
+            "insights":       insights,
+            "perfs":          {k: {
                 "total_trades": v.total_trades,
                 "win_rate": v.win_rate,
                 "sharpe": v.sharpe,
@@ -600,8 +697,8 @@ class Optimizer:
     # Research log
     # ------------------------------------------------------------------
 
-    def _save_research(self, findings: list[ResearchFinding]) -> None:
-        """Append research findings to the research log (JSONL)."""
+    def _save_research(self, findings: list[ResearchFinding], insights: str = "") -> None:
+        """Append research findings (and optional LLM insights) to the research log (JSONL)."""
         with open(_RESEARCH_LOG_PATH, "a", encoding="utf-8") as fh:
             for f in findings:
                 fh.write(json.dumps({
@@ -612,6 +709,16 @@ class Optimizer:
                     "relevance_score": f.relevance_score,
                     "category":        f.category,
                     "source_url":      f.source_url,
+                }) + "\n")
+            if insights:
+                fh.write(json.dumps({
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "query":     "_llm_synthesis",
+                    "ticker":    None,
+                    "snippet":   insights,
+                    "relevance_score": 1.0,
+                    "category":  "synthesis",
+                    "source_url": "",
                 }) + "\n")
 
     # ------------------------------------------------------------------

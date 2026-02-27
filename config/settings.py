@@ -30,6 +30,10 @@ NEWSAPI_KEY = os.getenv("NEWSAPI_KEY", "")
 # --- Tavily (web search for optimizer + research) ---
 TAVILY_API_KEY = os.getenv("TAVILY_API_KEY", "")
 
+# --- Local LLM (self-improvement analysis) ---
+LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://127.0.0.1:1234/v1")
+LLM_MODEL    = os.getenv("LLM_MODEL",    "qwen3.5-397b-a17b")
+
 # --- Telegram ---
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID", "")
