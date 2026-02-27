@@ -49,3 +49,7 @@ MIN_TRADES_FOR_TUNING   = 10       # minimum trades before a strategy can be tun
 OPTIMIZER_COOLING_HOURS = 24       # minimum hours between changes to the same param
 OPTIMIZER_MAX_STEP_PCT  = 0.10     # max parameter change per cycle (10%)
 WEB_SEARCH_MAX_REQUESTS = 10       # max DuckDuckGo requests per optimizer run
+
+# --- Long/Short strategy ---
+MAX_SHORT_EXPOSURE = float(os.getenv("MAX_SHORT_EXPOSURE", "0.30"))
+# Maximum fraction of portfolio held in short positions (30%)

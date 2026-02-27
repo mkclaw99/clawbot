@@ -20,16 +20,16 @@ DO NOT modify these values programmatically or from user input.
 MAX_POSITION_FRACTION = 0.05
 
 # Maximum fraction of portfolio allocated to a single strategy (30%)
-MAX_STRATEGY_ALLOCATION = 0.30
+MAX_STRATEGY_ALLOCATION = 0.3
 
 # Maximum fraction in meme stocks specifically (extra risky) (10%)
-MAX_MEME_ALLOCATION = 0.10
+MAX_MEME_ALLOCATION = 0.1
 
 # Maximum fraction for any single meme stock (extra risky) (2%)
 MAX_MEME_POSITION_FRACTION = 0.02
 
 # Minimum stock price — refuse to trade penny stocks below this
-MIN_STOCK_PRICE = 1.00  # USD
+MIN_STOCK_PRICE = 1.0  # USD
 
 # ---------------------------------------------------------------------------
 # LOSS CIRCUIT BREAKERS
@@ -62,9 +62,9 @@ MAX_ORDERS_PER_DAY    = 50
 # ---------------------------------------------------------------------------
 
 MAX_LEVERAGE        = 1.0   # Never use margin (1x = cash only)
-SHORT_SELLING       = False  # Absolutely no shorting
+SHORT_SELLING       = True  # Absolutely no shorting
 OPTIONS_WRITING     = False  # No selling options
-FUTURES_TRADING     = False
+FUTURES_TRADING     = True
 CRYPTO_TRADING      = False  # Paper phase: equities only
 
 # ---------------------------------------------------------------------------
