@@ -38,8 +38,9 @@ STRATEGY_PORTFOLIOS = [
     "mean_reversion",
     "options_flow",
     "macro_news",
+    "long_short_equity",
 ]
-COMBINED_START = STARTING_CAPITAL * len(STRATEGY_PORTFOLIOS)   # 5 × $100 k = $500 k
+COMBINED_START = STARTING_CAPITAL * len(STRATEGY_PORTFOLIOS)   # 6 × $100 k = $600 k
 
 # ---------------------------------------------------------------------------
 # Page config
@@ -63,6 +64,7 @@ def get_components():
     from strategies.mean_reversion import MeanReversionStrategy
     from strategies.options_flow import OptionsFlowStrategy
     from strategies.macro_news import MacroNewsStrategy
+    from strategies.long_short_equity import LongShortEquityStrategy
 
     # One isolated broker per strategy portfolio
     strategy_brokers = {pid: Broker(portfolio_id=pid) for pid in STRATEGY_PORTFOLIOS}
@@ -80,6 +82,7 @@ def get_components():
         MeanReversionStrategy(),
         OptionsFlowStrategy(),
         MacroNewsStrategy(),
+        LongShortEquityStrategy(),
     ]
     optimizer = Optimizer(strategies, aggregator)
     return strategy_brokers, portfolio, safety, aggregator, optimizer
@@ -292,11 +295,12 @@ if page == "Overview":
     per_strat_curves = curve_data["per_strategy"]
 
     _STRATEGY_COLORS = {
-        "meme_momentum":   "#ff6b6b",
-        "technical_trend": "#4ecdc4",
-        "mean_reversion":  "#45b7d1",
-        "options_flow":    "#96ceb4",
-        "macro_news":      "#feca57",
+        "meme_momentum":    "#ff6b6b",
+        "technical_trend":  "#4ecdc4",
+        "mean_reversion":   "#45b7d1",
+        "options_flow":     "#96ceb4",
+        "macro_news":       "#feca57",
+        "long_short_equity": "#a29bfe",
     }
 
     tab_combined, tab_per_strat = st.tabs(["Combined", "Per-Strategy"])
@@ -434,6 +438,7 @@ elif page == "Strategies":
         "mean_reversion":   "Bollinger Band mean reversion + Z-score",
         "options_flow":     "Unusual options activity → equity positioning",
         "macro_news":       "NLP sentiment on earnings, SEC filings, news",
+        "long_short_equity": "Cross-sectional multi-factor L/S (momentum, sentiment, trends, low-vol)",
     }
 
     state = get_combined_state()
