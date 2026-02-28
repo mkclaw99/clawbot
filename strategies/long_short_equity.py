@@ -104,8 +104,10 @@ class LongShortEquityStrategy(BaseStrategy):
     EXIT_LONG_THRESHOLD   = -0.10
     EXIT_SHORT_THRESHOLD  =  0.10
 
-    # Minimum number of daily bars required for momentum calculation
-    MIN_BARS: int = 65
+    # Minimum number of daily bars required for momentum calculation.
+    # The signal aggregator fetches ~60 calendar-day bars (~42-60 trading days),
+    # so 30 is the practical floor that allows both momentum and vol factors.
+    MIN_BARS: int = 30
 
     # ETF tickers excluded from the L/S universe (we only trade individual stocks)
     _ETF_TICKERS: frozenset = frozenset(GERMAN_ETFS)
