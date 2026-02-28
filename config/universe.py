@@ -74,10 +74,8 @@ MDAX_SELECTED: list[str] = [
     "LEG.DE",   # LEG Immobilien
     "NDX1.DE",  # Nordex
     "NEM.DE",   # Nemetschek
-    "O2D.DE",   # Telefonica Deutschland
     "RAA.DE",   # RATIONAL AG
     "SDF.DE",   # K+S
-    "TAG.DE",   # TAG Immobilien
     "TUI1.DE",  # TUI
     "UTDI.DE",  # United Internet
     "WAF.DE",   # Siltronic
@@ -183,10 +181,8 @@ TICKER_NAMES: dict[str, str] = {
     "LEG.DE":   "LEG Immobilien",
     "NDX1.DE":  "Nordex",
     "NEM.DE":   "Nemetschek",
-    "O2D.DE":   "Telefonica DE",
     "RAA.DE":   "RATIONAL",
     "SDF.DE":   "K+S",
-    "TAG.DE":   "TAG Immobilien",
     "TUI1.DE":  "TUI",
     "UTDI.DE":  "United Internet",
     "WAF.DE":   "Siltronic",
