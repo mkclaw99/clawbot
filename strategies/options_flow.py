@@ -1,16 +1,16 @@
 """
-Strategy 4: Options Flow / Unusual Activity
-============================================
-Follows unusual options activity — large block trades, high call/put skew,
-and dark pool prints — as a proxy for informed/institutional money.
+Strategy 4: Volume & Price Anomaly
+====================================
+Detects unusual volume and gap-up activity in XETRA equities as a proxy
+for institutional / smart-money accumulation.
 
-Data sources (web crawler feeds into context['options_flow']):
-  - Unusual Whales (free tier / web scrape)
-  - Barchart unusual options
-  - Market Chameleon
+Replaces the original options-flow strategy which required options chain data
+not available for German stocks on yfinance.
 
-The strategy does NOT trade options — it uses options flow as a
-directional signal to trade the underlying equity.
+Signal logic:
+  BUY  — volume surge (≥ MIN_VOL_RATIO × 20-day avg) with price moving up
+          Optional gap-up bonus when open > prior close by ≥ 0.3%
+  SELL — held position reverses ≥ 1% after a volume-driven entry
 """
 from __future__ import annotations
 
@@ -28,122 +28,102 @@ class OptionsFlowStrategy(BaseStrategy):
     @property
     def description(self) -> str:
         return (
-            "Follows unusual options activity (large blocks, high call/put skew) "
-            "as a signal for institutional / smart-money directional bets. "
-            "Trades the underlying equity only."
+            "Volume & price anomaly detection for XETRA. Detects unusual volume "
+            "surges and gap-up moves as institutional activity proxies. "
+            "Trades underlying equity only."
         )
 
-    # Thresholds
-    MIN_PREMIUM_RATIO  = 3.0   # options premium must be 3× average
-    MIN_CALL_PUT_RATIO = 2.0   # calls:puts ratio for bullish signal
-    MAX_DAYS_TO_EXPIRY = 30    # ignore LEAPS (may be hedges)
-    MIN_OI_CHANGE      = 0.20  # 20% open interest change
-    CONFIDENCE_BASE    = 0.60
+    # Thresholds — tunable by optimizer
+    MIN_VOL_RATIO  = 2.0    # volume must be ≥ 2× 20-day average
+    MIN_PRICE_MOVE = 0.005  # price must be up ≥ 0.5% on the volume day
+    VOL_LOOKBACK   = 20     # days for volume baseline
+    EXIT_REVERSAL  = -0.01  # exit held position on ≥ 1% intraday reversal
 
     def generate_signals(self, universe: list[str], context: dict) -> list[SignalResult]:
         """
-        context['options_flow'] = {
-            symbol: {
-                'call_put_ratio': float,
-                'premium_ratio': float,       # vs 30-day avg
-                'oi_change': float,           # % change in OI
-                'avg_days_to_expiry': float,
-                'block_trade_count': int,
-                'direction': 'bullish'|'bearish'|'neutral',
-                'source': str,
-                'notable_trade': str,         # human-readable description
-            }
-        }
+        context['bars']             — OHLCV bars per symbol
+        context['current_positions'] — set of currently held symbols
+        context['macro']            — regime; SHORTs suppressed in risk-off
         """
-        signals: list[SignalResult] = []
-        flow_data: dict = context.get("options_flow", {})
         bars_data: dict = context.get("bars", {})
         held: set       = context.get("current_positions", set())
+        macro: dict     = context.get("macro", {})
+        regime          = macro.get("regime", "neutral")
 
-        for symbol, flow in flow_data.items():
-            if symbol not in universe:
+        signals: list[SignalResult] = []
+        for symbol in universe:
+            bars = bars_data.get(symbol, [])
+            if not bars or len(bars) < self.VOL_LOOKBACK + 1:
                 continue
             try:
-                sig = self._analyse(symbol, flow, bars_data.get(symbol, []), held)
+                sig = self._analyse(symbol, bars, held, regime)
                 if sig:
                     signals.append(sig)
             except Exception as e:
-                logger.error(f"[OptionsFlow] Error {symbol}: {e}")
+                logger.error(f"[VolumeAnomaly] {symbol}: {e}")
 
-        logger.info(f"[OptionsFlow] {len(signals)} signals")
+        logger.info(f"[VolumeAnomaly] {len(signals)} signals")
         return signals
 
-    def _analyse(self, symbol: str, flow: dict, bars: list[dict], held: set) -> SignalResult | None:
-        direction     = flow.get("direction", "neutral")
-        cp_ratio      = flow.get("call_put_ratio", 1.0)
-        prem_ratio    = flow.get("premium_ratio", 1.0)
-        oi_change     = flow.get("oi_change", 0.0)
-        avg_dte       = flow.get("avg_days_to_expiry", 60)
-        block_count   = flow.get("block_trade_count", 0)
-        notable_trade = flow.get("notable_trade", "")
+    def _analyse(
+        self, symbol: str, bars: list[dict], held: set, regime: str
+    ) -> SignalResult | None:
+        recent = bars[-1]
+        prev   = bars[-2]
 
-        # Filter: ignore if LEAPS-dominated or no unusual activity
-        if avg_dte > self.MAX_DAYS_TO_EXPIRY:
+        # Volume baseline — exclude most-recent bar to avoid look-ahead
+        vol_window = bars[-(self.VOL_LOOKBACK + 1):-1]
+        avg_vol = sum(b["v"] for b in vol_window) / self.VOL_LOOKBACK
+        if avg_vol == 0:
             return None
-        if prem_ratio < self.MIN_PREMIUM_RATIO:
-            return None
+        vol_ratio = recent["v"] / avg_vol
 
-        # Price confirmation from bars
-        price_trend = "flat"
-        if bars and len(bars) >= 5:
-            closes = [b["c"] for b in bars[-5:]]
-            if closes[-1] > closes[0] * 1.005:
-                price_trend = "up"
-            elif closes[-1] < closes[0] * 0.995:
-                price_trend = "down"
+        price_change = (recent["c"] - prev["c"]) / prev["c"] if prev["c"] > 0 else 0.0
+        gap_up       = (recent["o"] - prev["c"]) / prev["c"] if prev["c"] > 0 else 0.0
 
-        # --- EXIT for held positions ---
+        # --- EXIT held positions on reversal ---
         if symbol in held:
-            if direction == "bearish" and price_trend == "down":
+            if price_change < self.EXIT_REVERSAL:
                 return SignalResult(
                     symbol=symbol,
                     action="SELL",
-                    score=0.65,
+                    score=0.60,
                     confidence=0.70,
-                    reason=f"Options flow turned bearish: CP={cp_ratio:.1f}, trend=down",
+                    reason=(
+                        f"Volume anomaly reversal: {price_change:+.1%} "
+                        f"on vol {vol_ratio:.1f}×avg"
+                    ),
                     strategy=self.name,
                 )
             return None
 
         # --- BUY signal ---
-        if (direction == "bullish"
-                and cp_ratio >= self.MIN_CALL_PUT_RATIO
-                and prem_ratio >= self.MIN_PREMIUM_RATIO
-                and oi_change >= self.MIN_OI_CHANGE
-                and price_trend in ("up", "flat")
-                and block_count >= 1):
+        if vol_ratio < self.MIN_VOL_RATIO:
+            return None
+        if price_change < self.MIN_PRICE_MOVE:
+            return None
+        if regime == "risk-off":
+            return None
 
-            score = min(1.0,
-                (cp_ratio / 5.0) * 0.3
-                + min(1, prem_ratio / 10.0) * 0.3
-                + min(1, oi_change) * 0.2
-                + (0.2 if price_trend == "up" else 0.1)
-            )
+        score = min(1.0,
+            min(1.0, vol_ratio / 5.0)          * 0.50   # volume surge magnitude
+            + min(1.0, price_change / 0.03)    * 0.30   # price move
+            + (0.20 if gap_up > 0.003 else 0.10)        # gap-up bonus vs flat open
+        )
 
-            return SignalResult(
-                symbol=symbol,
-                action="BUY",
-                score=round(float(score), 3),
-                confidence=min(0.85, self.CONFIDENCE_BASE + score * 0.25),
-                reason=(
-                    f"Unusual options: CP={cp_ratio:.1f}, premium {prem_ratio:.1f}×avg, "
-                    f"OI+{oi_change:.0%}, {block_count} blocks. {notable_trade}"
-                ),
-                strategy=self.name,
-                metadata=flow,
-            )
-
-        # --- SELL/short-avoidance signal ---
-        if (direction == "bearish"
-                and cp_ratio < 0.5
-                and prem_ratio >= self.MIN_PREMIUM_RATIO
-                and price_trend == "down"):
-            # We don't short, but we want to exit if held
-            return None  # handled in exit block above
-
-        return None
+        return SignalResult(
+            symbol=symbol,
+            action="BUY",
+            score=round(score, 3),
+            confidence=min(0.85, 0.60 + score * 0.25),
+            reason=(
+                f"Volume surge: {vol_ratio:.1f}×avg, "
+                f"price {price_change:+.1%}, gap={gap_up:+.1%}"
+            ),
+            strategy=self.name,
+            metadata={
+                "vol_ratio":    round(vol_ratio, 2),
+                "price_change": round(price_change, 4),
+                "gap_up":       round(gap_up, 4),
+            },
+        )

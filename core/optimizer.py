@@ -48,8 +48,9 @@ from crawler.web_searcher import WebResearcher, ResearchFinding
 
 PARAM_BOUNDS: dict[str, dict[str, tuple]] = {
     "meme_momentum": {
-        "MIN_MENTION_SPIKE": (1.5,  4.0,  0.25),
-        "MIN_SENTIMENT":     (0.05, 0.40, 0.05),
+        "MIN_MENTION_SPIKE": (1.0,  3.0,  0.25),   # lowered lower bound for XETRA
+        "MIN_SENTIMENT":     (0.0,  0.30, 0.05),   # 0.0 floor; neutral ok
+        "GTREND_SPIKE_MIN":  (2.0,  4.0,  0.25),   # Trends-primary path threshold
     },
     "technical_trend": {
         "RSI_OVERSOLD":   (25.0, 45.0, 2.0),
@@ -60,8 +61,8 @@ PARAM_BOUNDS: dict[str, dict[str, tuple]] = {
         "BB_PERIOD":    (15.0, 30.0, 1.0),
     },
     "options_flow": {
-        "MIN_PREMIUM_RATIO":  (2.0, 5.0, 0.25),
-        "MIN_CALL_PUT_RATIO": (1.5, 3.5, 0.25),
+        "MIN_VOL_RATIO":   (1.5, 4.0, 0.25),   # volume surge threshold
+        "MIN_PRICE_MOVE":  (0.002, 0.015, 0.001),  # min price move on surge day
     },
     "macro_news": {
         "BUY_SENTIMENT_THRESHOLD":  (0.40, 0.75, 0.05),

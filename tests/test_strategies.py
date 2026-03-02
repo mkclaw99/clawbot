@@ -1,5 +1,5 @@
 """
-Tests for all 5 strategy modules.
+Tests for all 6 strategy modules.
 Run with: pytest tests/test_strategies.py -v
 """
 import sys
@@ -78,42 +78,93 @@ class TestTechnicalTrend:
 
 class TestMemeMomentum:
 
-    def make_context(self, spike: float = 3.0, sentiment: float = 0.5):
+    def make_context(self, spike: float = 3.0, sentiment: float = 0.5,
+                     gtrend_spike: float = 1.0, gtrend_dir: str = "flat",
+                     gtrend_score: float = 20):
         return {
             "meme_signals": {
-                "GME": {
+                "SAP.DE": {
                     "mention_count": 100,
                     "mention_spike": spike,
                     "sentiment": sentiment,
-                    "sources": ["wsb", "stocktwits"],
-                    "top_post": "GME is going to the moon!!!",
+                    "sources": ["Aktien", "mauerstrassenwetten"],
+                    "top_post": "SAP earnings beat!",
                 }
             },
-            "bars": {"GME": make_bars(10, "up")},
+            "bars": {"SAP.DE": make_bars(10, "up")},
+            "google_trends": {
+                "SAP.DE": {
+                    "interest_score": gtrend_score,
+                    "spike_ratio": gtrend_spike,
+                    "trend": gtrend_dir,
+                }
+            },
             "current_positions": set(),
+            "macro": {},
         }
 
-    def test_buy_on_high_spike_positive_sentiment(self):
+    def test_buy_on_reddit_spike_positive_sentiment(self):
         s    = MemeMomentumStrategy()
-        sigs = s.generate_signals(["GME"], self.make_context(spike=4.0, sentiment=0.6))
+        sigs = s.generate_signals(["SAP.DE"], self.make_context(spike=4.0, sentiment=0.6))
         buys = [sig for sig in sigs if sig.action == "BUY"]
         assert len(buys) > 0
 
-    def test_no_signal_on_low_spike(self):
+    def test_no_signal_on_low_spike_no_trends(self):
         s    = MemeMomentumStrategy()
-        sigs = s.generate_signals(["GME"], self.make_context(spike=0.5, sentiment=0.8))
+        sigs = s.generate_signals(["SAP.DE"], self.make_context(spike=0.5, sentiment=0.8))
         buys = [sig for sig in sigs if sig.action == "BUY"]
         assert len(buys) == 0
 
-    def test_no_signal_on_negative_sentiment(self):
+    def test_no_signal_on_negative_sentiment_no_trends(self):
         s    = MemeMomentumStrategy()
-        sigs = s.generate_signals(["GME"], self.make_context(spike=5.0, sentiment=-0.5))
+        sigs = s.generate_signals(["SAP.DE"], self.make_context(spike=5.0, sentiment=-0.5))
+        buys = [sig for sig in sigs if sig.action == "BUY"]
+        assert len(buys) == 0
+
+    def test_buy_via_google_trends_primary_path(self):
+        """Google Trends spike alone (no Reddit) should generate a BUY."""
+        s = MemeMomentumStrategy()
+        context = {
+            "meme_signals": {},   # no Reddit data
+            "bars": {"SAP.DE": make_bars(10, "up")},
+            "google_trends": {
+                "SAP.DE": {
+                    "interest_score": 65,
+                    "spike_ratio": 3.5,    # strong spike
+                    "trend": "rising",
+                }
+            },
+            "current_positions": set(),
+            "macro": {},
+        }
+        sigs = s.generate_signals(["SAP.DE"], context)
+        buys = [sig for sig in sigs if sig.action == "BUY"]
+        assert len(buys) > 0
+        assert buys[0].is_meme is True
+
+    def test_no_trends_buy_when_trend_not_rising(self):
+        """Trends spike without rising direction should NOT trigger."""
+        s = MemeMomentumStrategy()
+        context = {
+            "meme_signals": {},
+            "bars": {"SAP.DE": make_bars(10, "up")},
+            "google_trends": {
+                "SAP.DE": {
+                    "interest_score": 65,
+                    "spike_ratio": 3.5,
+                    "trend": "flat",    # not rising
+                }
+            },
+            "current_positions": set(),
+            "macro": {},
+        }
+        sigs = s.generate_signals(["SAP.DE"], context)
         buys = [sig for sig in sigs if sig.action == "BUY"]
         assert len(buys) == 0
 
     def test_meme_flag_set(self):
         s    = MemeMomentumStrategy()
-        sigs = s.generate_signals(["GME"], self.make_context(spike=4.0, sentiment=0.6))
+        sigs = s.generate_signals(["SAP.DE"], self.make_context(spike=4.0, sentiment=0.6))
         for sig in sigs:
             if sig.action == "BUY":
                 assert sig.is_meme is True
@@ -122,18 +173,20 @@ class TestMemeMomentum:
         s = MemeMomentumStrategy()
         context = {
             "meme_signals": {
-                "GME": {
+                "SAP.DE": {
                     "mention_count": 5,
                     "mention_spike": 0.3,   # faded
                     "sentiment": -0.2,
-                    "sources": ["wsb"],
+                    "sources": ["Aktien"],
                     "top_post": "",
                 }
             },
             "bars": {},
-            "current_positions": {"GME"},   # currently held
+            "google_trends": {},
+            "current_positions": {"SAP.DE"},   # currently held
+            "macro": {},
         }
-        sigs = s.generate_signals(["GME"], context)
+        sigs = s.generate_signals(["SAP.DE"], context)
         sells = [sig for sig in sigs if sig.action == "SELL"]
         assert len(sells) > 0
 
@@ -171,42 +224,64 @@ class TestMeanReversion:
 
 
 class TestOptionsFlow:
+    """Volume & Price Anomaly strategy (replaced options-chain logic for XETRA)."""
 
-    def make_bullish_flow(self) -> dict:
-        return {
-            "call_put_ratio": 3.5,
-            "premium_ratio": 4.0,
-            "oi_change": 0.35,
-            "avg_days_to_expiry": 14,
-            "block_trade_count": 3,
-            "direction": "bullish",
-            "source": "unusual_whales",
-            "notable_trade": "Large $2M call sweep at $150 strike",
-        }
+    def make_volume_surge_bars(self, n: int = 25) -> list[dict]:
+        """Bars where the last bar has 3× average volume and price moved up."""
+        bars = make_bars(n, "flat")
+        avg_vol = sum(b["v"] for b in bars[:-1]) / (n - 1)
+        bars[-1]["v"] = avg_vol * 3.0     # volume surge
+        bars[-1]["c"] = bars[-2]["c"] * 1.01  # +1% price move
+        bars[-1]["o"] = bars[-2]["c"] * 1.004  # gap up
+        return bars
 
-    def test_buy_on_strong_bullish_flow(self):
+    def test_buy_on_volume_surge_and_price_up(self):
         s = OptionsFlowStrategy()
         context = {
-            "options_flow": {"AAPL": self.make_bullish_flow()},
-            "bars": {"AAPL": make_bars(10, "up")},
+            "bars": {"SAP.DE": self.make_volume_surge_bars()},
             "current_positions": set(),
+            "macro": {"regime": "neutral"},
         }
-        sigs = s.generate_signals(["AAPL"], context)
+        sigs = s.generate_signals(["SAP.DE"], context)
         buys = [sig for sig in sigs if sig.action == "BUY"]
         assert len(buys) > 0
 
-    def test_no_signal_on_weak_premium(self):
-        s    = OptionsFlowStrategy()
-        flow = self.make_bullish_flow()
-        flow["premium_ratio"] = 1.2  # below threshold
+    def test_no_signal_on_low_volume(self):
+        s = OptionsFlowStrategy()
+        bars = make_bars(25, "up")   # normal volume, uptrend
         context = {
-            "options_flow": {"AAPL": flow},
-            "bars": {"AAPL": make_bars(10, "up")},
+            "bars": {"SAP.DE": bars},
             "current_positions": set(),
+            "macro": {"regime": "neutral"},
         }
-        sigs = s.generate_signals(["AAPL"], context)
+        sigs = s.generate_signals(["SAP.DE"], context)
         buys = [sig for sig in sigs if sig.action == "BUY"]
         assert len(buys) == 0
+
+    def test_no_signal_in_risk_off(self):
+        s = OptionsFlowStrategy()
+        context = {
+            "bars": {"SAP.DE": self.make_volume_surge_bars()},
+            "current_positions": set(),
+            "macro": {"regime": "risk-off"},
+        }
+        sigs = s.generate_signals(["SAP.DE"], context)
+        buys = [sig for sig in sigs if sig.action == "BUY"]
+        assert len(buys) == 0
+
+    def test_sell_on_reversal_of_held_position(self):
+        s = OptionsFlowStrategy()
+        bars = make_bars(25, "flat")
+        # Last bar drops 2%
+        bars[-1]["c"] = bars[-2]["c"] * 0.98
+        context = {
+            "bars": {"SAP.DE": bars},
+            "current_positions": {"SAP.DE"},   # held
+            "macro": {"regime": "neutral"},
+        }
+        sigs = s.generate_signals(["SAP.DE"], context)
+        sells = [sig for sig in sigs if sig.action == "SELL"]
+        assert len(sells) > 0
 
 
 class TestMacroNews:

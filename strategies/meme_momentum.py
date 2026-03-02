@@ -36,11 +36,14 @@ class MemeMomentumStrategy(BaseStrategy):
         )
 
     # Thresholds — tunable by web optimizer (within bounds)
-    MIN_MENTION_SPIKE  = 2.0    # current mentions must be 2× rolling average
-    MIN_SENTIMENT      = 0.15   # VADER compound score threshold
+    MIN_MENTION_SPIKE  = 1.2    # 2.0 was US-centric; XETRA stocks get less Reddit chatter
+    MIN_SENTIMENT      = 0.0    # neutral sentiment acceptable (was 0.15)
     MIN_PRICE          = 2.0    # ignore sub-$2 stocks
     MAX_PRICE          = 500.0  # ignore extremely expensive for sizing
     MOMENTUM_LOOKBACK  = 3      # bars of price momentum needed
+    # Google Trends primary path (fires even without Reddit data)
+    GTREND_SPIKE_MIN   = 2.5    # search interest must be 2.5× 3-month avg
+    GTREND_SCORE_MIN   = 30     # absolute interest floor (0–100)
 
     def generate_signals(self, universe: list[str], context: dict) -> list[SignalResult]:
         """
@@ -63,14 +66,31 @@ class MemeMomentumStrategy(BaseStrategy):
         max_new_pos = 1 if regime == "risk-off" or fear_greed < 25 else 3
 
         # Score and rank all meme candidates
+        # Evaluate symbols with Reddit data first, then Trends-only symbols
+        seen: set[str] = set()
         candidates = []
         for symbol, ms in meme_signals.items():
             if symbol not in universe:
                 continue
+            seen.add(symbol)
             trend = google_trends.get(symbol, {})
             score = self._score(symbol, ms, bars_data.get(symbol, []), trend)
             if score is not None:
                 candidates.append((symbol, score, ms))
+
+        # Google Trends-primary path: evaluate universe symbols with no Reddit data
+        for symbol, trend in google_trends.items():
+            if symbol in seen or symbol not in universe:
+                continue
+            gtrend_spike = trend.get("spike_ratio", 1.0)
+            gtrend_dir   = trend.get("trend", "flat")
+            gtrend_score = trend.get("interest_score", 0)
+            if (gtrend_spike >= self.GTREND_SPIKE_MIN
+                    and gtrend_dir == "rising"
+                    and gtrend_score >= self.GTREND_SCORE_MIN):
+                sig = self._score(symbol, {}, bars_data.get(symbol, []), trend)
+                if sig is not None:
+                    candidates.append((symbol, sig, {}))
 
         # Sort by score descending
         candidates.sort(key=lambda x: x[1].score, reverse=True)
@@ -117,13 +137,19 @@ class MemeMomentumStrategy(BaseStrategy):
         gtrend_spike  = trend.get("spike_ratio", 1.0)      # vs 3-month avg
         gtrend_dir    = trend.get("trend", "flat")          # rising/falling/flat
 
-        # Minimum quality filters
-        if mention_spike < self.MIN_MENTION_SPIKE:
-            return None
-        if sentiment < self.MIN_SENTIMENT:
+        # Two entry paths:
+        #   1. Reddit path — mention spike + positive sentiment
+        #   2. Google Trends-primary path — strong search interest spike
+        #      (covers XETRA stocks with little Reddit presence)
+        reddit_ok  = mention_spike >= self.MIN_MENTION_SPIKE and sentiment >= self.MIN_SENTIMENT
+        gtrend_ok  = (gtrend_spike >= self.GTREND_SPIKE_MIN
+                      and gtrend_dir == "rising"
+                      and gtrend_score >= self.GTREND_SCORE_MIN)
+
+        if not reddit_ok and not gtrend_ok:
             return None
 
-        # Price confirmation — is price actually moving up?
+        # Price confirmation — required for both paths
         price_confirmed = False
         last_price = 0.0
         if bars and len(bars) >= self.MOMENTUM_LOOKBACK + 1:
@@ -145,37 +171,49 @@ class MemeMomentumStrategy(BaseStrategy):
             avg_vol    = sum(b["v"] for b in bars[-20:]) / 20
             vol_spike  = recent_vol > avg_vol * 1.5
 
-        # Google Trends bonus — rising search interest adds confirmation
-        gtrend_bonus = 0.0
-        if gtrend_spike > 2.0 and gtrend_dir == "rising":
-            gtrend_bonus = 0.12    # strong search spike + rising trend
-        elif gtrend_spike > 1.5 or gtrend_dir == "rising":
-            gtrend_bonus = 0.06    # moderate signal
+        if gtrend_ok and not reddit_ok:
+            # Google Trends-primary path — no Reddit data required
+            score = min(1.0,
+                min(1.0, gtrend_spike / 5.0) * 0.50    # trends spike magnitude
+                + (0.20 if gtrend_score > 50 else 0.10) # absolute interest level
+                + (0.15 if vol_spike else 0.0)           # volume confirmation
+                + 0.10                                   # price-confirmed bonus
+            )
+            reason = (
+                f"Trends spike: {gtrend_spike:.1f}×avg, "
+                f"interest={gtrend_score:.0f}/100 ({gtrend_dir})"
+                f"{', vol surge' if vol_spike else ''}"
+            )
+        else:
+            # Reddit path with optional Trends boost
+            gtrend_bonus = 0.0
+            if gtrend_spike > 2.0 and gtrend_dir == "rising":
+                gtrend_bonus = 0.12
+            elif gtrend_spike > 1.5 or gtrend_dir == "rising":
+                gtrend_bonus = 0.06
 
-        # Composite score (weights sum to 1.0 base, bonus is additive)
-        score = (
-            min(1.0, mention_spike / 5.0) * 0.38   # Reddit mention spike
-            + max(0, min(1, sentiment))     * 0.32  # social sentiment
-            + (0.13 if vol_spike else 0)            # volume confirmation
-            + (0.05 if len(sources) > 1 else 0)    # multi-source bonus
-            + gtrend_bonus                          # Google Trends boost
-        )
-        score = min(1.0, score)
-
-        multi_source = ", ".join(sources)
-        trend_str = (f"gtrend={gtrend_score:.0f}/100 ({gtrend_dir}, {gtrend_spike:.1f}×avg)"
-                     if gtrend_score > 0 else "no trend data")
+            score = min(1.0,
+                min(1.0, mention_spike / 5.0) * 0.38   # Reddit mention spike
+                + max(0, min(1, sentiment))     * 0.32  # social sentiment
+                + (0.13 if vol_spike else 0)            # volume confirmation
+                + (0.05 if len(sources) > 1 else 0)    # multi-source bonus
+                + gtrend_bonus
+            )
+            multi_source = ", ".join(sources)
+            trend_str = (f"gtrend={gtrend_score:.0f}/100 ({gtrend_dir}, {gtrend_spike:.1f}×avg)"
+                         if gtrend_score > 0 else "no trend data")
+            reason = (
+                f"Meme spike: {mention_spike:.1f}× mentions, "
+                f"sentiment={sentiment:.2f}, sources=[{multi_source}], "
+                f"{'vol spike, ' if vol_spike else ''}{trend_str}"
+            )
 
         return SignalResult(
             symbol=symbol,
             action="BUY",
             score=round(score, 3),
             confidence=min(0.9, score),
-            reason=(
-                f"Meme spike: {mention_spike:.1f}× mentions, "
-                f"sentiment={sentiment:.2f}, sources=[{multi_source}], "
-                f"{'vol spike, ' if vol_spike else ''}{trend_str}"
-            ),
+            reason=reason,
             strategy=self.name,
             is_meme=True,
             metadata={
