@@ -50,6 +50,13 @@ STRATEGY_PORTFOLIOS = [
     "long_short_equity",
 ]
 
+# Per-strategy base allocation fraction (of portfolio value per trade).
+# meme_momentum is the high-risk / high-reward outlier: 5% per trade vs 2% default.
+_STRATEGY_BASE_PCT: dict[str, float] = {
+    "meme_momentum": 0.05,
+}
+_DEFAULT_BASE_PCT = 0.02
+
 
 def _portfolio_summary(portfolio_id: str) -> dict:
     """Return a summary dict for one strategy portfolio."""
@@ -533,7 +540,8 @@ def cmd_run_cycle(_args) -> None:
                         price = broker.get_latest_price(symbol)
                         if price <= 0:
                             continue
-                        qty = max(1, int(portfolio_value * 0.02 * sig.confidence * size_mult / price))
+                        base_pct = _STRATEGY_BASE_PCT.get(sig.strategy, _DEFAULT_BASE_PCT)
+                        qty = max(1, int(portfolio_value * base_pct * sig.confidence * size_mult / price))
                         allowed, reason = safety.check_order(
                             symbol=symbol, action="BUY", qty=qty, price=price,
                             strategy=sig.strategy, portfolio_value=portfolio_value,
@@ -586,8 +594,9 @@ def cmd_run_cycle(_args) -> None:
                         price = broker.get_latest_price(symbol)
                         if price <= 0:
                             continue
+                        base_pct = _STRATEGY_BASE_PCT.get(sig.strategy, _DEFAULT_BASE_PCT)
                         qty = max(1, int(
-                            portfolio_value * 0.02 * sig.confidence * size_mult / price
+                            portfolio_value * base_pct * sig.confidence * size_mult / price
                         ))
                         # Use absolute value of existing short exposure for safety check
                         existing_pos = broker.get_position(symbol)

@@ -51,7 +51,7 @@ class TestPositionLimits:
     def test_blocks_meme_stock_exceeding_meme_limit(self, safety):
         portfolio = 100_000
         price = 10.0
-        qty   = int(portfolio * 0.05 / price)  # 5% — exceeds 2% meme limit
+        qty   = int(portfolio * 0.15 / price)  # 15% — exceeds 10% meme limit
         allowed, reason = safety.check_order(
             symbol="GME", action="BUY", qty=qty, price=price,
             strategy="meme_momentum", portfolio_value=portfolio,

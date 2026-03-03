@@ -22,11 +22,11 @@ MAX_POSITION_FRACTION = 0.05
 # Maximum fraction of portfolio allocated to a single strategy (30%)
 MAX_STRATEGY_ALLOCATION = 0.3
 
-# Maximum fraction in meme stocks specifically (extra risky) (10%)
-MAX_MEME_ALLOCATION = 0.1
+# Maximum fraction in meme stocks specifically (high-risk strategy) (50%)
+MAX_MEME_ALLOCATION = 0.5
 
-# Maximum fraction for any single meme stock (extra risky) (2%)
-MAX_MEME_POSITION_FRACTION = 0.02
+# Maximum fraction for any single meme stock (high-risk strategy) (10%)
+MAX_MEME_POSITION_FRACTION = 0.10
 
 # Minimum stock price — refuse to trade penny stocks below this
 MIN_STOCK_PRICE = 1.0  # USD

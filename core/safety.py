@@ -313,22 +313,16 @@ class SafetyLayer:
                 return False, reason
 
             # 5. Position size limit
+            # Meme positions use their own (higher) cap; non-meme use the global cap.
             new_position_value = current_position_value + trade_value
-            max_position = portfolio_value * SC.MAX_POSITION_FRACTION
+            pos_fraction = SC.MAX_MEME_POSITION_FRACTION if is_meme else SC.MAX_POSITION_FRACTION
+            max_position  = portfolio_value * pos_fraction
             if new_position_value > max_position:
-                reason = (f"Position size ${new_position_value:,.0f} exceeds "
-                          f"max {SC.MAX_POSITION_FRACTION:.0%} of portfolio (${max_position:,.0f})")
+                label  = "Meme position" if is_meme else "Position size"
+                reason = (f"{label} ${new_position_value:,.0f} exceeds "
+                          f"max {pos_fraction:.0%} of portfolio (${max_position:,.0f})")
                 audit_order(action, symbol, qty, price, strategy, reason, False)
                 return False, reason
-
-            # 6. Meme stock limits
-            if is_meme:
-                max_meme_pos = portfolio_value * SC.MAX_MEME_POSITION_FRACTION
-                if new_position_value > max_meme_pos:
-                    reason = (f"Meme position ${new_position_value:,.0f} exceeds "
-                              f"meme max {SC.MAX_MEME_POSITION_FRACTION:.0%} (${max_meme_pos:,.0f})")
-                    audit_order(action, symbol, qty, price, strategy, reason, False)
-                    return False, reason
 
             # 7. Strategy allocation limit
             max_strategy = portfolio_value * SC.MAX_STRATEGY_ALLOCATION

@@ -60,10 +60,8 @@ class MemeMomentumStrategy(BaseStrategy):
         google_trends: dict  = context.get("google_trends", {})
         macro: dict          = context.get("macro", {})
 
-        # In extreme fear regimes, reduce max new meme positions
-        regime      = macro.get("regime", "neutral")
-        fear_greed  = macro.get("fear_greed_score", 50)
-        max_new_pos = 1 if regime == "risk-off" or fear_greed < 25 else 3
+        # High-risk strategy: no regime throttle — fires in all market conditions
+        max_new_pos = 5
 
         # Score and rank all meme candidates
         # Evaluate symbols with Reddit data first, then Trends-only symbols
